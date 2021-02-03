@@ -1,0 +1,133 @@
+---
+- hosts: app_nodes
+  become: yes
+  vars:
+    app_url: https://github.com/raziel98x/vouchershop/releases/download/v0.2/vouchershop.jar
+    java_rpm_url: https://corretto.aws/downloads/latest/amazon-corretto-11-x64-al2-jre.rpm
+    app_dest_dir: /opt/vouchershop
+    app_user: vouchershop
+  tasks:
+    - name: install java runtime
+      yum:
+        name: "{{ java_rpm_url }}"
+    - name: create user
+      user:
+        name: "{{ app_user }}"
+    - name: define dir structure
+      file:
+        path: "{{ app_dest_dir }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        state: directory
+    - name: download app jar file
+      get_url:
+        url: "{{ app_url }}"
+        dest: "{{ app_dest_dir }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+    - name: put systemd cfg
+      template:
+        src: files/systemd/vouchershop.service
+        dest: /etc/systemd/system/vouchershop.service
+    - name: enable on boot and start app
+      systemd:
+        name: vouchershop
+        daemon_reload: yes
+        enabled: yes
+        state: restarted
+
+- hosts: web_nodes
+  vars:
+    epel_rpm_url: https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+    app_nodes:
+      - 172.31.33.139:3000
+  become: yes
+  tasks:
+    - name: install epel repo
+      yum:
+        name: "{{ epel_rpm_url }}"
+    - name: install nginx
+      yum:
+        name: nginx
+    - name: put nginx cfg into /etc
+      template:
+        src: files/nginx/vouchershop.conf
+        dest: /etc/nginx/conf.d/vouchershop.conf
+    - name: restart nginx
+      systemd:
+        name: nginx
+        enabled: yes
+        state: restarted
+
+- hosts: stats_db
+  vars:
+    influx_db_rpm_url: https://dl.influxdata.com/influxdb/releases/influxdb-1.8.3.x86_64.rpm
+    telegraf_rpm_url: https://dl.influxdata.com/telegraf/releases/telegraf-1.17.0-1.x86_64.rpm
+    grafana_rpm_url: https://dl.grafana.com/oss/release/grafana-7.3.7-1.x86_64.rpm
+    metrics_db_name: infrastructure
+    grafana_url: http://127.0.0.1:3000
+    grafana_user: admin
+    grafana_pw: TopSecretAdminPw
+  become: yes
+  tasks:
+    - name: install telegraf
+      yum: 
+        name: "{{ telegraf_rpm_url }}"
+    - name: install influx db
+      yum: 
+        name: "{{ influx_db_rpm_url }}"
+    - name: install grafana
+      yum: 
+        name: "{{ grafana_rpm_url }}"
+    - name: put telegraf cfg to /etc/telegraf
+      template:
+        src: files/telegraf/telegraf.conf
+        dest: /etc/telegraf/telegraf.conf
+    - name: start services influx
+      service:
+        name: influxdb
+        state: started
+    - yum:
+        name: python2-pip
+    - name: install influx db dep
+      pip:
+        name: influxdb
+    - name: create db for metrics
+      community.general.influxdb_database:
+        database_name: "{{ metrics_db_name }}"
+    - name: start services telegraf
+      service:
+        name: telegraf
+        state: restarted
+    - name: put grafana cfg to /etc/grafana
+      template:
+        src: files/grafana/grafana.ini
+        dest: /etc/grafana/grafana.ini
+    - name: start services grafana
+      service:
+        name: grafana-server
+        state: restarted
+    - name: create influx db as grafana data source
+      community.grafana.grafana_datasource:
+        name: "InfluxDB"
+        grafana_url: "{{ grafana_url }}"
+        grafana_user: "{{ grafana_user }}"
+        grafana_password: "{{ grafana_pw }}"
+        org_id: "1"
+        ds_type: "influxdb"
+        ds_url: "http://127.0.0.1:8086"
+        database: "{{ metrics_db_name }}"
+        time_interval: ">10s"
+    - name: copy dashboard cfg int /tmp
+      copy:
+        src: files/grafana/dashboard.json
+        dest: /tmp/my_dashboard.json
+    - name: import grafana dashboard
+      community.grafana.grafana_dashboard:
+        grafana_url: "{{ grafana_url }}"
+        grafana_user: "{{ grafana_user }}"
+        grafana_password: "{{ grafana_pw }}"
+        state: present
+        commit_message: Updated by ansible
+        overwrite: yes
+        path: /tmp/my_dashboard.json
